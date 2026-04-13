@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AlertCircle, AlertTriangle, Pen, Check, X } from 'lucide-react';
-import * as api from '../../../api';
+import * as api from '../../api';
 
 export interface NcmBadgeProps {
   item: any;

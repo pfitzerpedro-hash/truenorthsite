@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import * as api from '../../api';
+import * as api from '../api';
 
 export interface UseOperationsHistoryReturn {
   operations: api.Operation[];

@@ -3,7 +3,7 @@
  */
 
 // Re-export types from api
-export type { User, Operation, OperationsStats, ClassifiedResult } from '../../api';
+export type { User, Operation, OperationsStats, ClassifiedResult } from '../api';
 
 // Auth types
 export interface AuthModalProps {
