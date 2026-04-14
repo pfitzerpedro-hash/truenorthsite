@@ -1,7 +1,7 @@
 // TrueNorth API Client
 // Conecta o frontend ao backend real
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_URL = import.meta.env.VITE_API_URL ?? '';
 
 // Auth Types
 export interface User {
