@@ -7,7 +7,7 @@ import * as fs from 'fs';
 
 export const config = { api: { bodyParser: false } };
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 3 });
 
 const EXTRACTION_PROMPT = `You are an expert Brazilian customs (Receita Federal) specialist.
 Analyze this commercial invoice and extract ALL data in the following JSON format.
@@ -124,7 +124,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     ];
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: 'gpt-4o-mini',
       messages,
       max_tokens: 4000,
       temperature: 0.1,
@@ -135,7 +135,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     extractedData = JSON.parse(cleaned);
   } catch (aiError: any) {
     console.error('AI extraction error:', aiError);
-    return res.status(500).json({ error: 'Erro ao processar documento com IA. Tente novamente.' });
+    const isRateLimit = aiError?.status === 429 || aiError?.message?.includes('Rate limit');
+    return res.status(500).json({
+      error: isRateLimit
+        ? 'Limite de requisições atingido. Aguarde 30 segundos e tente novamente.'
+        : 'Erro ao processar documento com IA. Tente novamente.',
+    });
   }
 
   const processingTime = Date.now() - startTime;
