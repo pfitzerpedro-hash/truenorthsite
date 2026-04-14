@@ -15,6 +15,7 @@ import { DuimpExportSection } from '../components/results/DuimpExportSection';
 import { FichaProdutoSimulada } from '../components/results/FichaProdutoSimulada';
 import { CostBreakdownTooltip } from '../components/results/CostBreakdownTooltip';
 import { calcularRiscoNCM } from '../utils/businessLogic';
+import { Footer } from '../components/layout/Footer';
 // --- LISTA DE PAÍSES QUE MAIS EXPORTAM PARA O BRASIL ---
 const PAISES_IMPORTADORES = [
   'China',
