@@ -2,12 +2,12 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { IncomingForm, File as FormidableFile } from 'formidable';
 import { supabase } from './_lib/supabase';
 import { verifyToken } from './_lib/auth';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs';
 
 export const config = { api: { bodyParser: false } };
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 3 });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const EXTRACTION_PROMPT = `You are an expert Brazilian customs (Receita Federal) specialist.
 Analyze this commercial invoice and extract ALL data in the following JSON format.
@@ -112,35 +112,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const startTime = Date.now();
 
   try {
-    const messages: any[] = [
-      { role: 'system', content: EXTRACTION_PROMPT },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Extract all invoice data from this document:' },
-          { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } },
-        ],
-      },
-    ];
+    const isPdf = mimeType === 'application/pdf';
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages,
+    const contentBlock: any = isPdf
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+      : { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } };
+
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 4000,
-      temperature: 0.1,
+      system: EXTRACTION_PROMPT,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            contentBlock,
+            { type: 'text', text: 'Extract all invoice data from this document and return only valid JSON.' },
+          ],
+        },
+      ],
     });
 
-    const content = completion.choices[0].message.content || '{}';
+    const content = response.content[0].type === 'text' ? response.content[0].text : '{}';
     const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     extractedData = JSON.parse(cleaned);
   } catch (aiError: any) {
     console.error('AI extraction error:', aiError);
-    const isRateLimit = aiError?.status === 429 || aiError?.message?.includes('Rate limit');
-    return res.status(500).json({
-      error: isRateLimit
-        ? 'Limite de requisições atingido. Aguarde 30 segundos e tente novamente.'
-        : 'Erro ao processar documento com IA. Tente novamente.',
-    });
+    return res.status(500).json({ error: 'Erro ao processar documento com IA. Tente novamente.' });
   }
 
   const processingTime = Date.now() - startTime;

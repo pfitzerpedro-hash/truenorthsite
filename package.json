@@ -10,6 +10,7 @@
     "start": "serve dist -s -l $PORT"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
     "@supabase/supabase-js": "^2.103.0",
     "autoprefixer": "^10.4.27",
     "formidable": "^3.5.4",
