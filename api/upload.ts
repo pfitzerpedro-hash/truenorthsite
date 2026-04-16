@@ -94,25 +94,33 @@ async function extractWithClaude(fileBuffer: Buffer, mimeType: string, fileName:
     return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
   }
 
-  // --- PDF: use Anthropic beta document API ---
+  // --- PDF: use document API (native in claude-sonnet-4-6) ---
   if (mimeType === 'application/pdf' || ext === 'pdf') {
     const base64 = fileBuffer.toString('base64');
-    const response = await (anthropic as any).beta.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
-      system: EXTRACTION_PROMPT,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: base64 },
-          },
-          { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
-        ],
-      }],
-      betas: ['pdfs-2024-09-25'],
-    });
+    let response: any;
+    try {
+      // Try native PDF support first (claude-sonnet-4-6 supports it without beta)
+      response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4000,
+        system: EXTRACTION_PROMPT,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              source: { type: 'base64', media_type: 'application/pdf', data: base64 },
+            } as any,
+            { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
+          ],
+        }],
+      });
+    } catch (e1: any) {
+      console.error('PDF native attempt failed:', e1?.status, e1?.message, JSON.stringify(e1?.error));
+      // Fallback: send PDF as text by extracting readable content
+      // If native fails, re-throw so we get the real error
+      throw e1;
+    }
     const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
     return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
   }
@@ -194,7 +202,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     extractedData = await extractWithClaude(fileBuffer, mimeType, fileName);
   } catch (aiError: any) {
     const msg = aiError?.message || String(aiError);
-    console.error('AI extraction error:', msg);
+    console.error('AI extraction error:', aiError?.status, msg, JSON.stringify(aiError?.error || aiError?.headers || {}));
 
     if (msg.includes('não suportado')) {
       return res.status(400).json({ error: msg });
