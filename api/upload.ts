@@ -2,7 +2,6 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { IncomingForm, File as FormidableFile } from 'formidable';
 import { supabase } from './_lib/supabase';
 import { verifyToken } from './_lib/auth';
-import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs';
 
 export const config = {
@@ -11,54 +10,6 @@ export const config = {
     responseLimit: false,
   },
 };
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-const EXTRACTION_PROMPT = `You are an expert Brazilian customs (Receita Federal / DUIMP) specialist.
-Analyze this commercial invoice document and extract ALL data.
-Return ONLY a valid JSON object — no markdown, no explanation, just JSON.
-
-Required structure:
-{
-  "invoice_number": "string",
-  "invoice_date": "YYYY-MM-DD or empty string",
-  "supplier": { "name": "string", "address": "string", "country": "string" },
-  "buyer": { "name": "string", "cnpj": "string" },
-  "incoterm": "FOB/CIF/EXW/etc or null",
-  "currency": "USD/EUR/BRL/etc",
-  "total_value": number,
-  "freight": number or null,
-  "insurance": number or null,
-  "items": [
-    {
-      "description": "string",
-      "quantity": number,
-      "unit": "UN/KG/PC/etc",
-      "unit_price": number,
-      "total_price": number,
-      "ncm_sugerido": "8-digit NCM code or null",
-      "ncm_descricao": "NCM description in Portuguese",
-      "ncm_confianca": "ALTA or MEDIA or BAIXA",
-      "ncm_fonte": "documento or recomendado",
-      "peso_kg": number or null,
-      "origem": "country of origin or null",
-      "anuentes_necessarios": []
-    }
-  ],
-  "observacoes": [],
-  "campos_faltando": [],
-  "setor_detectado": "Eletrônicos/Maquinário/Alimentos/Vestuário/Químicos/Outros",
-  "anuentes_operacao": [],
-  "feedback_especialista": "string",
-  "impostos_estimados": {
-    "ii": number,
-    "ipi": number,
-    "pis_cofins": number,
-    "total_impostos": number,
-    "base_calculo": number
-  },
-  "alerta_subfaturamento": null
-}`;
 
 function parseForm(req: VercelRequest): Promise<{ file: FormidableFile }> {
   return new Promise((resolve, reject) => {
@@ -73,115 +24,6 @@ function parseForm(req: VercelRequest): Promise<{ file: FormidableFile }> {
       resolve({ file });
     });
   });
-}
-
-async function extractWithClaude(fileBuffer: Buffer, mimeType: string, fileName: string): Promise<any> {
-  const ext = fileName.split('.').pop()?.toLowerCase() || '';
-
-  // --- XML: parse as plain text ---
-  if (mimeType === 'text/xml' || mimeType === 'application/xml' || ext === 'xml') {
-    const xmlText = fileBuffer.toString('utf-8');
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
-      system: EXTRACTION_PROMPT,
-      messages: [{
-        role: 'user',
-        content: `Extract invoice data from this XML document:\n\n${xmlText.slice(0, 50000)}`,
-      }],
-    });
-    const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
-    return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
-  }
-
-  // --- PDF ---
-  if (mimeType === 'application/pdf' || ext === 'pdf') {
-    const base64 = fileBuffer.toString('base64');
-    let response: any;
-
-    // Attempt 1: native document support (newer models)
-    try {
-      response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
-        system: EXTRACTION_PROMPT,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } } as any,
-            { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
-          ],
-        }],
-      });
-      const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
-      return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
-    } catch (e1: any) {
-      console.error('PDF attempt 1 (native) failed:', e1?.status, e1?.message, JSON.stringify(e1?.error || {}));
-    }
-
-    // Attempt 2: beta header approach
-    try {
-      response = await (anthropic as any).beta.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
-        system: EXTRACTION_PROMPT,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
-            { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
-          ],
-        }],
-        betas: ['pdfs-2024-09-25'],
-      });
-      const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
-      return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
-    } catch (e2: any) {
-      console.error('PDF attempt 2 (beta) failed:', e2?.status, e2?.message, JSON.stringify(e2?.error || {}));
-    }
-
-    // Attempt 3: send PDF as base64 in a text message (last resort)
-    const prompt = `The following is a PDF file encoded in base64. Extract the invoice data and return only valid JSON.\n\nNote: this is a base64-encoded PDF — read the readable text portions.\n\nBase64 (first 30000 chars):\n${base64.slice(0, 30000)}`;
-    response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
-      system: EXTRACTION_PROMPT,
-      messages: [{ role: 'user', content: prompt }],
-    });
-    const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
-    return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
-  }
-
-  // --- Image (JPEG, PNG, GIF, WEBP) ---
-  const imageTypes: Record<string, string> = {
-    'image/jpeg': 'image/jpeg', 'image/jpg': 'image/jpeg',
-    'image/png': 'image/png', 'image/gif': 'image/gif',
-    'image/webp': 'image/webp',
-  };
-  const resolvedMime = imageTypes[mimeType] || (ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'png' ? 'image/png' : null);
-
-  if (resolvedMime) {
-    const base64 = fileBuffer.toString('base64');
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
-      system: EXTRACTION_PROMPT,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: resolvedMime as any, data: base64 },
-          },
-          { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
-        ],
-      }],
-    });
-    const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
-    return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
-  }
-
-  throw new Error(`Tipo de arquivo não suportado: ${mimeType || ext}. Use PDF, XML ou imagem (JPEG, PNG).`);
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -210,9 +52,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     fileBuffer = fs.readFileSync(file.filepath);
   } catch {
     return res.status(400).json({ error: 'Erro ao ler arquivo enviado' });
+  } finally {
+    try { fs.unlinkSync(file.filepath); } catch {}
   }
 
-  // Check file size (max 10MB for AI processing)
   if (fileBuffer.length > 10 * 1024 * 1024) {
     return res.status(400).json({ error: 'Arquivo muito grande. Máximo 10MB.' });
   }
@@ -221,52 +64,41 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const storagePath = `${userId}/${Date.now()}_${fileName}`;
   supabase.storage.from('invoices').upload(storagePath, fileBuffer, { contentType: mimeType }).catch(() => {});
 
-  // AI extraction
+  // Call n8n webhook for AI processing
+  const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL;
+  if (!n8nWebhookUrl) {
+    return res.status(500).json({ error: 'Webhook n8n não configurado. Adicione N8N_WEBHOOK_URL nas variáveis de ambiente do Vercel.' });
+  }
+
+  const fileBase64 = fileBuffer.toString('base64');
   const startTime = Date.now();
-  let extractedData: any;
 
+  let n8nResponse: any;
   try {
-    extractedData = await extractWithClaude(fileBuffer, mimeType, fileName);
-  } catch (aiError: any) {
-    const msg = aiError?.message || String(aiError);
-    console.error('AI extraction error:', aiError?.status, msg, JSON.stringify(aiError?.error || aiError?.headers || {}));
-
-    if (msg.includes('não suportado')) {
-      return res.status(400).json({ error: msg });
-    }
-    return res.status(500).json({
-      error: 'Erro ao processar documento com IA. Verifique se o arquivo está legível e tente novamente.',
+    const response = await fetch(n8nWebhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId,
+        fileName,
+        mimeType,
+        fileBase64,
+        storagePath,
+        startTime,
+      }),
     });
-  } finally {
-    try { fs.unlinkSync(file.filepath); } catch {}
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('n8n error:', response.status, errText);
+      return res.status(500).json({ error: 'Erro no processamento pelo n8n: ' + errText });
+    }
+
+    n8nResponse = await response.json();
+  } catch (err: any) {
+    console.error('n8n fetch error:', err.message);
+    return res.status(500).json({ error: 'Não foi possível conectar ao n8n. Verifique se o workflow está ativo.' });
   }
 
-  // Save to Supabase
-  const { data: operation, error: dbError } = await supabase
-    .from('operations')
-    .insert({
-      user_id: userId,
-      arquivo_nome: fileName,
-      arquivo_tipo: mimeType,
-      arquivo_url: storagePath,
-      status: 'completed',
-      dados_extraidos: extractedData,
-      tempo_economizado_min: 17,
-      erros: [],
-    })
-    .select()
-    .single();
-
-  if (dbError) {
-    console.error('DB error:', dbError);
-    return res.status(500).json({ error: 'Erro ao salvar operação no banco de dados' });
-  }
-
-  return res.json({
-    operationId: operation.id,
-    file: { name: fileName },
-    dadosExtraidos: extractedData,
-    status: 'completed',
-    processingTimeMs: Date.now() - startTime,
-  });
+  return res.json(n8nResponse);
 }

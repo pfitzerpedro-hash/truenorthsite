@@ -1,0 +1,122 @@
+{
+  "name": "TrueNorth - Processamento de Invoice",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "invoice-process",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Receber Invoice",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={{ $vars.GEMINI_API_KEY }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyType": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [\n      {\n        \"inlineData\": {\n          \"mimeType\": \"{{ $json.mimeType }}\",\n          \"data\": \"{{ $json.fileBase64 }}\"\n        }\n      },\n      {\n        \"text\": \"You are an expert Brazilian customs (Receita Federal / DUIMP) specialist.\\nAnalyze this commercial invoice document and extract ALL data.\\nReturn ONLY a valid JSON object with this structure:\\n{\\n  \\\"invoice_number\\\": \\\"string\\\",\\n  \\\"invoice_date\\\": \\\"YYYY-MM-DD\\\",\\n  \\\"supplier\\\": { \\\"name\\\": \\\"string\\\", \\\"address\\\": \\\"string\\\", \\\"country\\\": \\\"string\\\" },\\n  \\\"buyer\\\": { \\\"name\\\": \\\"string\\\", \\\"cnpj\\\": \\\"string\\\" },\\n  \\\"incoterm\\\": \\\"FOB/CIF/EXW or null\\\",\\n  \\\"currency\\\": \\\"USD/EUR/BRL\\\",\\n  \\\"total_value\\\": 0,\\n  \\\"freight\\\": null,\\n  \\\"insurance\\\": null,\\n  \\\"items\\\": [\\n    {\\n      \\\"description\\\": \\\"string\\\",\\n      \\\"quantity\\\": 0,\\n      \\\"unit\\\": \\\"UN/KG/PC\\\",\\n      \\\"unit_price\\\": 0,\\n      \\\"total_price\\\": 0,\\n      \\\"ncm_sugerido\\\": \\\"8-digit NCM or null\\\",\\n      \\\"ncm_descricao\\\": \\\"NCM description in Portuguese\\\",\\n      \\\"ncm_confianca\\\": \\\"ALTA or MEDIA or BAIXA\\\",\\n      \\\"ncm_fonte\\\": \\\"documento or recomendado\\\",\\n      \\\"peso_kg\\\": null,\\n      \\\"origem\\\": \\\"country of origin or null\\\",\\n      \\\"anuentes_necessarios\\\": []\\n    }\\n  ],\\n  \\\"observacoes\\\": [],\\n  \\\"campos_faltando\\\": [],\\n  \\\"setor_detectado\\\": \\\"Eletrônicos/Maquinário/Alimentos/Vestuário/Químicos/Outros\\\",\\n  \\\"anuentes_operacao\\\": [],\\n  \\\"feedback_especialista\\\": \\\"string\\\",\\n  \\\"impostos_estimados\\\": {\\n    \\\"ii\\\": 0,\\n    \\\"ipi\\\": 0,\\n    \\\"pis_cofins\\\": 0,\\n    \\\"total_impostos\\\": 0,\\n    \\\"base_calculo\\\": 0\\n  },\\n  \\\"alerta_subfaturamento\\\": null\\n}\"\n      }\n    ]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"maxOutputTokens\": 4096\n  }\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "gemini-extract",
+      "name": "Gemini - Extrair Dados",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\n\n// Extract text from Gemini response\nlet text = '';\ntry {\n  text = response.candidates[0].content.parts[0].text || '{}';\n} catch (e) {\n  throw new Error('Gemini não retornou resposta válida: ' + JSON.stringify(response));\n}\n\n// Clean JSON (remove markdown fences if present)\ntext = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n\n// Parse JSON\nlet dados;\ntry {\n  dados = JSON.parse(text);\n} catch (e) {\n  throw new Error('Resposta da IA não é JSON válido: ' + text.slice(0, 200));\n}\n\n// Get original input from webhook\nconst input = $('Receber Invoice').first().json;\n\nreturn [{\n  json: {\n    userId: input.userId,\n    fileName: input.fileName,\n    mimeType: input.mimeType,\n    storagePath: input.storagePath || '',\n    dadosExtraidos: dados,\n    startTime: input.startTime || Date.now()\n  }\n}];\n"
+      },
+      "id": "parse-response",
+      "name": "Processar Resposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://jkffnfourgbrgsipntzc.supabase.co/rest/v1/operations",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $vars.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $vars.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "bodyType": "json",
+        "jsonBody": "={\n  \"user_id\": \"{{ $json.userId }}\",\n  \"arquivo_nome\": \"{{ $json.fileName }}\",\n  \"arquivo_tipo\": \"{{ $json.mimeType }}\",\n  \"arquivo_url\": \"{{ $json.storagePath }}\",\n  \"status\": \"completed\",\n  \"dados_extraidos\": {{ JSON.stringify($json.dadosExtraidos) }},\n  \"tempo_economizado_min\": 17,\n  \"erros\": []\n}",
+        "options": {}
+      },
+      "id": "save-supabase",
+      "name": "Salvar no Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"operationId\": \"{{ $json[0].id }}\",\n  \"dadosExtraidos\": {{ JSON.stringify($('Processar Resposta').first().json.dadosExtraidos) }},\n  \"status\": \"completed\",\n  \"processingTimeMs\": {{ Date.now() - $('Processar Resposta').first().json.startTime }}\n}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Responder ao Site",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"error\": \"Erro ao processar invoice: \" + $json.message }",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "error-handler",
+      "name": "Retornar Erro",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [960, 500]
+    }
+  ],
+  "connections": {
+    "Receber Invoice": {
+      "main": [[{ "node": "Gemini - Extrair Dados", "type": "main", "index": 0 }]]
+    },
+    "Gemini - Extrair Dados": {
+      "main": [[{ "node": "Processar Resposta", "type": "main", "index": 0 }]]
+    },
+    "Processar Resposta": {
+      "main": [[{ "node": "Salvar no Supabase", "type": "main", "index": 0 }]]
+    },
+    "Salvar no Supabase": {
+      "main": [[{ "node": "Responder ao Site", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["truenorth", "invoice", "gemini"],
+  "pinData": {}
+}
