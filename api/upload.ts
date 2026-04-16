@@ -5,22 +5,27 @@ import { verifyToken } from './_lib/auth';
 import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs';
 
-export const config = { api: { bodyParser: false } };
+export const config = {
+  api: {
+    bodyParser: false,
+    responseLimit: false,
+  },
+};
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const EXTRACTION_PROMPT = `You are an expert Brazilian customs (Receita Federal) specialist.
-Analyze this commercial invoice and extract ALL data in the following JSON format.
-Respond ONLY with valid JSON, no markdown, no explanations.
+const EXTRACTION_PROMPT = `You are an expert Brazilian customs (Receita Federal / DUIMP) specialist.
+Analyze this commercial invoice document and extract ALL data.
+Return ONLY a valid JSON object — no markdown, no explanation, just JSON.
 
-Required JSON structure:
+Required structure:
 {
   "invoice_number": "string",
-  "invoice_date": "YYYY-MM-DD",
+  "invoice_date": "YYYY-MM-DD or empty string",
   "supplier": { "name": "string", "address": "string", "country": "string" },
   "buyer": { "name": "string", "cnpj": "string" },
-  "incoterm": "string or null (e.g. FOB, CIF, EXW)",
-  "currency": "string (e.g. USD, EUR)",
+  "incoterm": "FOB/CIF/EXW/etc or null",
+  "currency": "USD/EUR/BRL/etc",
   "total_value": number,
   "freight": number or null,
   "insurance": number or null,
@@ -28,52 +33,120 @@ Required JSON structure:
     {
       "description": "string",
       "quantity": number,
-      "unit": "string (e.g. UN, KG, PC)",
+      "unit": "UN/KG/PC/etc",
       "unit_price": number,
       "total_price": number,
       "ncm_sugerido": "8-digit NCM code or null",
-      "ncm_descricao": "string description of NCM",
+      "ncm_descricao": "NCM description in Portuguese",
       "ncm_confianca": "ALTA or MEDIA or BAIXA",
       "ncm_fonte": "documento or recomendado",
       "peso_kg": number or null,
       "origem": "country of origin or null",
-      "anuentes_necessarios": ["ANVISA", "ANATEL", etc. - only if applicable]
+      "anuentes_necessarios": []
     }
   ],
-  "observacoes": ["list of important observations"],
-  "campos_faltando": ["list of missing required fields"],
-  "setor_detectado": "e.g. Eletrônicos, Vestuário, Maquinário, Alimentos, Químicos",
-  "anuentes_operacao": ["list of applicable regulatory bodies"],
-  "feedback_especialista": "string with expert compliance notes",
+  "observacoes": [],
+  "campos_faltando": [],
+  "setor_detectado": "Eletrônicos/Maquinário/Alimentos/Vestuário/Químicos/Outros",
+  "anuentes_operacao": [],
+  "feedback_especialista": "string",
   "impostos_estimados": {
-    "ii": number (import tax estimate),
+    "ii": number,
     "ipi": number,
     "pis_cofins": number,
     "total_impostos": number,
     "base_calculo": number
   },
-  "alerta_subfaturamento": "string warning if values seem too low, or null"
-}
+  "alerta_subfaturamento": null
+}`;
 
-Important rules:
-- NCM codes must be 8 digits for Brazil
-- For electronics: check ANATEL requirements
-- For food/pharma: check ANVISA requirements
-- For chemicals: check IBAMA requirements
-- Estimate taxes: II average 10-20%, IPI 5-15%, PIS/COFINS ~9.25% of base
-- base_calculo = (total_value + freight + insurance) * current BRL rate approximation
-- Flag subfaturamento if unit prices seem below market value`;
-
-async function parseForm(req: VercelRequest): Promise<{ file: FormidableFile; fields: any }> {
+function parseForm(req: VercelRequest): Promise<{ file: FormidableFile }> {
   return new Promise((resolve, reject) => {
-    const form = new IncomingForm({ maxFileSize: 10 * 1024 * 1024, keepExtensions: true });
-    form.parse(req as any, (err, fields, files) => {
-      if (err) return reject(err);
+    const form = new IncomingForm({
+      maxFileSize: 20 * 1024 * 1024,
+      keepExtensions: true,
+    });
+    form.parse(req as any, (err, _fields, files) => {
+      if (err) return reject(new Error('Falha ao receber arquivo: ' + err.message));
       const file = Array.isArray(files.file) ? files.file[0] : files.file;
-      if (!file) return reject(new Error('Nenhum arquivo enviado'));
-      resolve({ file, fields });
+      if (!file) return reject(new Error('Nenhum arquivo encontrado na requisição'));
+      resolve({ file });
     });
   });
+}
+
+async function extractWithClaude(fileBuffer: Buffer, mimeType: string, fileName: string): Promise<any> {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+
+  // --- XML: parse as plain text ---
+  if (mimeType === 'text/xml' || mimeType === 'application/xml' || ext === 'xml') {
+    const xmlText = fileBuffer.toString('utf-8');
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4000,
+      system: EXTRACTION_PROMPT,
+      messages: [{
+        role: 'user',
+        content: `Extract invoice data from this XML document:\n\n${xmlText.slice(0, 50000)}`,
+      }],
+    });
+    const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
+    return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+  }
+
+  // --- PDF: use Anthropic beta document API ---
+  if (mimeType === 'application/pdf' || ext === 'pdf') {
+    const base64 = fileBuffer.toString('base64');
+    const response = await (anthropic as any).beta.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4000,
+      system: EXTRACTION_PROMPT,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: base64 },
+          },
+          { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
+        ],
+      }],
+      betas: ['pdfs-2024-09-25'],
+    });
+    const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
+    return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+  }
+
+  // --- Image (JPEG, PNG, GIF, WEBP) ---
+  const imageTypes: Record<string, string> = {
+    'image/jpeg': 'image/jpeg', 'image/jpg': 'image/jpeg',
+    'image/png': 'image/png', 'image/gif': 'image/gif',
+    'image/webp': 'image/webp',
+  };
+  const resolvedMime = imageTypes[mimeType] || (ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'png' ? 'image/png' : null);
+
+  if (resolvedMime) {
+    const base64 = fileBuffer.toString('base64');
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4000,
+      system: EXTRACTION_PROMPT,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: resolvedMime as any, data: base64 },
+          },
+          { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
+        ],
+      }],
+    });
+    const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
+    return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+  }
+
+  throw new Error(`Tipo de arquivo não suportado: ${mimeType || ext}. Use PDF, XML ou imagem (JPEG, PNG).`);
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -86,69 +159,54 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const userId = await verifyToken(req.headers.authorization);
   if (!userId) return res.status(401).json({ error: 'Autenticação necessária' });
 
+  // Parse file
   let file: FormidableFile;
   try {
-    const parsed = await parseForm(req);
-    file = parsed.file;
+    ({ file } = await parseForm(req));
   } catch (err: any) {
-    return res.status(400).json({ error: err.message || 'Erro ao processar arquivo' });
+    return res.status(400).json({ error: err.message });
   }
 
   const fileName = file.originalFilename || file.newFilename || 'invoice';
-  const mimeType = file.mimetype || 'application/octet-stream';
-  const fileBuffer = fs.readFileSync(file.filepath);
-  const base64 = fileBuffer.toString('base64');
-
-  // Upload to Supabase Storage
-  const storagePath = `${userId}/${Date.now()}_${fileName}`;
-  await supabase.storage.from('invoices').upload(storagePath, fileBuffer, { contentType: mimeType });
-
-  // Normalize MIME type for Claude API
-  const isPdf = mimeType === 'application/pdf';
-  const isImage = mimeType.startsWith('image/');
-  const supportedImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-  const imageMediaType = supportedImageTypes.includes(mimeType) ? mimeType : 'image/jpeg';
-
-  let extractedData: any;
-  const startTime = Date.now();
+  const mimeType = file.mimetype || '';
+  let fileBuffer: Buffer;
 
   try {
-    let contentBlock: any;
-    if (isPdf) {
-      contentBlock = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } };
-    } else if (isImage) {
-      contentBlock = { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: base64 } };
-    } else {
-      // Try as PDF fallback
-      contentBlock = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } };
-    }
-
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
-      system: EXTRACTION_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            contentBlock,
-            { type: 'text', text: 'Extract all invoice data from this document and return only valid JSON.' },
-          ],
-        },
-      ],
-    });
-
-    const content = response.content[0].type === 'text' ? response.content[0].text : '{}';
-    const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    extractedData = JSON.parse(cleaned);
-  } catch (aiError: any) {
-    console.error('AI extraction error:', aiError?.message || aiError);
-    return res.status(500).json({ error: 'Erro ao processar documento com IA. Tente novamente.' });
+    fileBuffer = fs.readFileSync(file.filepath);
+  } catch {
+    return res.status(400).json({ error: 'Erro ao ler arquivo enviado' });
   }
 
-  const processingTime = Date.now() - startTime;
+  // Check file size (max 10MB for AI processing)
+  if (fileBuffer.length > 10 * 1024 * 1024) {
+    return res.status(400).json({ error: 'Arquivo muito grande. Máximo 10MB.' });
+  }
 
-  // Save operation to Supabase
+  // Upload to Supabase Storage (non-blocking)
+  const storagePath = `${userId}/${Date.now()}_${fileName}`;
+  supabase.storage.from('invoices').upload(storagePath, fileBuffer, { contentType: mimeType }).catch(() => {});
+
+  // AI extraction
+  const startTime = Date.now();
+  let extractedData: any;
+
+  try {
+    extractedData = await extractWithClaude(fileBuffer, mimeType, fileName);
+  } catch (aiError: any) {
+    const msg = aiError?.message || String(aiError);
+    console.error('AI extraction error:', msg);
+
+    if (msg.includes('não suportado')) {
+      return res.status(400).json({ error: msg });
+    }
+    return res.status(500).json({
+      error: 'Erro ao processar documento com IA. Verifique se o arquivo está legível e tente novamente.',
+    });
+  } finally {
+    try { fs.unlinkSync(file.filepath); } catch {}
+  }
+
+  // Save to Supabase
   const { data: operation, error: dbError } = await supabase
     .from('operations')
     .insert({
@@ -166,17 +224,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (dbError) {
     console.error('DB error:', dbError);
-    return res.status(500).json({ error: 'Erro ao salvar operação' });
+    return res.status(500).json({ error: 'Erro ao salvar operação no banco de dados' });
   }
-
-  // Clean up temp file
-  try { fs.unlinkSync(file.filepath); } catch {}
 
   return res.json({
     operationId: operation.id,
     file: { name: fileName },
     dadosExtraidos: extractedData,
     status: 'completed',
-    processingTimeMs: processingTime,
+    processingTimeMs: Date.now() - startTime,
   });
 }
