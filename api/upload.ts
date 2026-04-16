@@ -94,12 +94,13 @@ async function extractWithClaude(fileBuffer: Buffer, mimeType: string, fileName:
     return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
   }
 
-  // --- PDF: use document API (native in claude-sonnet-4-6) ---
+  // --- PDF ---
   if (mimeType === 'application/pdf' || ext === 'pdf') {
     const base64 = fileBuffer.toString('base64');
     let response: any;
+
+    // Attempt 1: native document support (newer models)
     try {
-      // Try native PDF support first (claude-sonnet-4-6 supports it without beta)
       response = await anthropic.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 4000,
@@ -107,20 +108,46 @@ async function extractWithClaude(fileBuffer: Buffer, mimeType: string, fileName:
         messages: [{
           role: 'user',
           content: [
-            {
-              type: 'document',
-              source: { type: 'base64', media_type: 'application/pdf', data: base64 },
-            } as any,
+            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } } as any,
             { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
           ],
         }],
       });
+      const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
+      return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
     } catch (e1: any) {
-      console.error('PDF native attempt failed:', e1?.status, e1?.message, JSON.stringify(e1?.error));
-      // Fallback: send PDF as text by extracting readable content
-      // If native fails, re-throw so we get the real error
-      throw e1;
+      console.error('PDF attempt 1 (native) failed:', e1?.status, e1?.message, JSON.stringify(e1?.error || {}));
     }
+
+    // Attempt 2: beta header approach
+    try {
+      response = await (anthropic as any).beta.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4000,
+        system: EXTRACTION_PROMPT,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+            { type: 'text', text: 'Extract all invoice data and return only valid JSON.' },
+          ],
+        }],
+        betas: ['pdfs-2024-09-25'],
+      });
+      const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
+      return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+    } catch (e2: any) {
+      console.error('PDF attempt 2 (beta) failed:', e2?.status, e2?.message, JSON.stringify(e2?.error || {}));
+    }
+
+    // Attempt 3: send PDF as base64 in a text message (last resort)
+    const prompt = `The following is a PDF file encoded in base64. Extract the invoice data and return only valid JSON.\n\nNote: this is a base64-encoded PDF — read the readable text portions.\n\nBase64 (first 30000 chars):\n${base64.slice(0, 30000)}`;
+    response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4000,
+      system: EXTRACTION_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+    });
     const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
     return JSON.parse(text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
   }
