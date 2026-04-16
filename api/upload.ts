@@ -103,23 +103,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const storagePath = `${userId}/${Date.now()}_${fileName}`;
   await supabase.storage.from('invoices').upload(storagePath, fileBuffer, { contentType: mimeType });
 
-  // Build OpenAI message content
+  // Normalize MIME type for Claude API
+  const isPdf = mimeType === 'application/pdf';
   const isImage = mimeType.startsWith('image/');
-  const mediaType = isImage ? mimeType : 'application/pdf';
-  const dataUrl = `data:${mediaType};base64,${base64}`;
+  const supportedImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+  const imageMediaType = supportedImageTypes.includes(mimeType) ? mimeType : 'image/jpeg';
 
   let extractedData: any;
   const startTime = Date.now();
 
   try {
-    const isPdf = mimeType === 'application/pdf';
-
-    const contentBlock: any = isPdf
-      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
-      : { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } };
+    let contentBlock: any;
+    if (isPdf) {
+      contentBlock = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } };
+    } else if (isImage) {
+      contentBlock = { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: base64 } };
+    } else {
+      // Try as PDF fallback
+      contentBlock = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } };
+    }
 
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-6',
       max_tokens: 4000,
       system: EXTRACTION_PROMPT,
       messages: [
@@ -137,7 +142,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     extractedData = JSON.parse(cleaned);
   } catch (aiError: any) {
-    console.error('AI extraction error:', aiError);
+    console.error('AI extraction error:', aiError?.message || aiError);
     return res.status(500).json({ error: 'Erro ao processar documento com IA. Tente novamente.' });
   }
 
