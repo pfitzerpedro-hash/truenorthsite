@@ -88,16 +88,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }),
     });
 
+    const rawText = await response.text();
+    console.log('n8n response status:', response.status);
+    console.log('n8n response body:', rawText.slice(0, 500));
+
     if (!response.ok) {
-      const errText = await response.text();
-      console.error('n8n error:', response.status, errText);
-      return res.status(500).json({ error: 'Erro no processamento pelo n8n: ' + errText });
+      return res.status(500).json({ error: 'n8n retornou erro ' + response.status + ': ' + rawText.slice(0, 300) });
     }
 
-    n8nResponse = await response.json();
+    try {
+      n8nResponse = JSON.parse(rawText);
+    } catch {
+      console.error('n8n body não é JSON:', rawText.slice(0, 500));
+      return res.status(500).json({ error: 'n8n retornou resposta inválida: ' + rawText.slice(0, 200) });
+    }
   } catch (err: any) {
     console.error('n8n fetch error:', err.message);
-    return res.status(500).json({ error: 'Não foi possível conectar ao n8n. Verifique se o workflow está ativo.' });
+    return res.status(500).json({ error: 'Não foi possível conectar ao n8n: ' + err.message });
   }
 
   return res.json(n8nResponse);
